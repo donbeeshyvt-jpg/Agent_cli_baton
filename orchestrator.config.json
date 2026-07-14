@@ -1,0 +1,79 @@
+{
+  "project": "agentbaton",
+  "defaultChain": "default",
+  "strategy": "balance",
+  "timeoutMs": 600000,
+  "chief": "claude",
+  "mission": {
+    "maxTasks": 12
+  },
+  "_strategy_說明": "balance=負載平衡(均攤額度,least-used優先) / priority=依鏈順序(配合角色鏈=角色分工)。可用 --strategy 或 --only 單獨叫某家當子代理覆寫。",
+  "chains": {
+    "default": [
+      "claude",
+      "codex",
+      "grok",
+      "cursor"
+    ],
+    "implement": [
+      "codex",
+      "cursor",
+      "grok",
+      "claude"
+    ],
+    "review": [
+      "claude",
+      "grok",
+      "codex",
+      "cursor"
+    ],
+    "plan": [
+      "claude",
+      "grok",
+      "cursor",
+      "codex"
+    ]
+  },
+  "providers": {
+    "claude": {
+      "cooldownMinutes": 300,
+      "sandbox": null,
+      "model": null,
+      "note": "規劃/審查優先。model=null 用你方案的最新預設；可填 opus / sonnet / claude-opus-4-8。清 ANTHROPIC_* 走訂閱登入。",
+      "preferredRoles": [
+        "plan",
+        "review"
+      ]
+    },
+    "codex": {
+      "cooldownMinutes": 300,
+      "sandbox": "danger-full-access",
+      "model": null,
+      "note": "實作優先。sandbox 用 danger-full-access —— 本機 codex 的 Windows 工作區沙箱元件缺失(codex-windows-sandbox-setup.exe)，workspace-write 會寫不進檔；對你自己的信任專案用 full-access 讓它直接做。model=null 用 codex 最新預設；~/.codex 的 ChatGPT 訂閱登入。",
+      "preferredRoles": [
+        "implement",
+        "test"
+      ]
+    },
+    "grok": {
+      "cooldownMinutes": 60,
+      "sandbox": null,
+      "model": null,
+      "note": "備援/實作。model=null 用預設 grok-4.5；用 ~/.grok 的 SuperGrok 訂閱登入。",
+      "preferredRoles": [
+        "review",
+        "research"
+      ]
+    },
+    "cursor": {
+      "cooldownMinutes": 300,
+      "sandbox": null,
+      "model": null,
+      "note": "需另裝 cursor-agent CLI 並 cursor-agent login（Cursor 訂閱）。model=null 用 Cursor 預設。此 adapter 尚未實機驗證。",
+      "preferredRoles": [
+        "implement",
+        "docs"
+      ]
+    }
+  }
+}

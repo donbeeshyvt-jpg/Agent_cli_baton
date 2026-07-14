@@ -1,0 +1,36 @@
+# 相依
+node_modules/
+
+# 執行期狀態（機器維護，含用量/冷卻，不該進版控）
+.orchestrator/
+
+# 暫存與日誌
+*.log
+_*.mjs
+_*.txt
+_start_body.json
+
+# 憑證與敏感資料（絕不進版控）
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+.credentials.json
+
+# 各家 CLI 的本機設定（若誤放進專案）
+.claude/settings.local.json
+.codex/
+.grok/
+
+# 作業區/示範產出（用本工具開發的專案，不該混進本 repo）
+demo-*/
+workspace-*/
+_*_ref/
+
+# OS / 編輯器
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/

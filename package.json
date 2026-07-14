@@ -1,0 +1,40 @@
+{
+  "name": "agentbaton",
+  "version": "0.1.0",
+  "description": "多 CLI 訂閱輪替協作器 —— 用 claude / codex / grok / cursor 四家真實 CLI 的訂閱額度協作同一個專案，額度耗盡自動換手，靠 docs/ 共享記憶接力不失憶。",
+  "keywords": [
+    "cli",
+    "orchestrator",
+    "multi-agent",
+    "claude",
+    "codex",
+    "grok",
+    "cursor",
+    "ai-agent",
+    "subscription",
+    "failover"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "agentbaton": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "serve": "node src/cli.js serve",
+    "status": "node src/cli.js --status",
+    "doctor": "node src/cli.js --doctor",
+    "test": "node --test test/unit.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src/",
+    "skills/",
+    "orchestrator.config.json",
+    "AGENTS.md",
+    "README.md",
+    "LICENSE"
+  ]
+}
