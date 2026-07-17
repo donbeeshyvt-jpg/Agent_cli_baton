@@ -112,6 +112,13 @@ export function needsShell(bin) {
   return false;
 }
 
+// A5（#9 防線）：共用的「參數值安全」驗證。
+// .cmd 走 shell:true 時 Node 不跳脫 argv —— 含空白/shell 元字元的值會被 cmd 拆壞甚至注入。
+// model/sandbox 等「來自 config 或使用者、會進 argv」的值，一律先過這關。放行常見合法字元（英數 . - + : / [ ] = ,）。
+export function isSafeArgValue(v) {
+  return typeof v === 'string' && v.length > 0 && v.length <= 200 && /^[\w.\-+:/[\]=,@]+$/.test(v);
+}
+
 // 產生「乾淨」的環境變數（給 claude 子行程）：
 // - 清掉 ANTHROPIC_ 系列（session proxy base_url）與 CLAUDE_CODE_ session 標記 → 走使用者的訂閱登入
 // - 但保留 CLAUDE_CODE_OAUTH_TOKEN（`claude setup-token` 產的無人值守訂閱憑證，AUDIT P0-8）

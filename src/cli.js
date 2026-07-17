@@ -53,13 +53,36 @@ function parseModels(spec, prev = {}) {
   return out;
 }
 
+// A5：不認得的設定鍵 warn 但不擋（向前相容）：config 載入後補一層輕量 schema 驗證。
+// 只驗會影響安全/行為的關鍵欄位型別，不認得的頂層鍵只警告不擋（向前相容）。回傳警告陣列。
+export function validateConfig(config) {
+  const warns = [];
+  const KNOWN = new Set(['project', 'defaultChain', 'strategy', 'timeoutMs', 'chief', 'mission', 'chains', 'providers', 'verify']);
+  for (const k of Object.keys(config)) {
+    if (!KNOWN.has(k) && !k.startsWith('_')) warns.push(`不認得的設定鍵「${k}」（已忽略；底線開頭的註解鍵不算）`);
+  }
+  if (config.strategy && !['balance', 'priority'].includes(config.strategy)) warns.push(`strategy「${config.strategy}」非 balance/priority，執行時會退回預設`);
+  if (config.timeoutMs != null && (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0)) warns.push(`timeoutMs 應為正數，現值：${config.timeoutMs}`);
+  if (config.chains && typeof config.chains !== 'object') warns.push('chains 應為物件（鏈名→家陣列）');
+  if (config.providers && typeof config.providers === 'object') {
+    for (const [name, p] of Object.entries(config.providers)) {
+      if (p && p.sandbox != null && typeof p.sandbox !== 'string') warns.push(`providers.${name}.sandbox 應為字串或 null`);
+      if (p && p.cooldownMinutes != null && (!Number.isFinite(p.cooldownMinutes) || p.cooldownMinutes < 0)) warns.push(`providers.${name}.cooldownMinutes 應為非負數`);
+    }
+  }
+  return warns;
+}
+
 // 設定檔尋找順序：--cwd 指定的目錄 → agentbaton 安裝根目錄（讓 --cwd 指到任何作業區都能跑）
 function loadConfig(cwd) {
   for (const base of [cwd, APP_ROOT]) {
     const p = join(base, 'orchestrator.config.json');
     if (existsSync(p)) {
-      try { return JSON.parse(readFileSync(p, 'utf8')); }
+      let cfg;
+      try { cfg = JSON.parse(readFileSync(p, 'utf8')); }
       catch (e) { console.error(`設定檔解析失敗：${p}\n${e.message}`); process.exit(1); }
+      for (const w of validateConfig(cfg)) console.error(`⚠️ 設定檔：${w}`); // A5：warn 但不擋
+      return cfg;
     }
   }
   console.error(`找不到 orchestrator.config.json（找過：${cwd} 與 ${APP_ROOT}）`);

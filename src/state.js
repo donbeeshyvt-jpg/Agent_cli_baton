@@ -71,7 +71,13 @@ export function setCooldown(state, name, until, reason) {
   p.cooldownUntil = until instanceof Date ? until.toISOString() : until;
   p.reason = reason ? String(reason).replace(/\s+/g, ' ').slice(0, 200) : undefined;
   p.since = new Date().toISOString();
+  p.failStreak = (p.failStreak || 0) + 1; // B4：連續失敗 +1，供指數退避冷卻用
   state.providers[name] = p;
+}
+
+// B4：讀某家目前的連續失敗次數（給 jitteredCooldownUntil 算退避倍數）
+export function getFailStreak(state, name) {
+  return state.providers?.[name]?.failStreak || 0;
 }
 
 export function clearCooldown(state, name) {
@@ -86,6 +92,7 @@ export function recordUse(state, name, now = new Date(), ms = null) {
   p.uses = (p.uses || 0) + 1;
   p.lastUsedAt = now.toISOString();
   if (typeof ms === 'number' && ms > 0) p.totalMs = (p.totalMs || 0) + ms;
+  p.failStreak = 0; // B4：成功一次就清零連續失敗計數（冷卻退避基於它）
   state.providers[name] = p;
 }
 

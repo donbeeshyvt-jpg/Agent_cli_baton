@@ -89,3 +89,48 @@
 - **准入相依清單**：chokidar/uPlot/Ink/proper-lockfile 要不要引？（`fs.watch` + `fs.openSync('wx')` 可零相依替代）
 - **單一寫者政策**：orchestrator 是唯一寫者，還是 serve/poller 也寫？（決定鎖複雜度）
 - **決策優先序表**：`@provider` 定址 / role 鏈 / 預測跳過 / cooldown / balance 疊在一起時聽誰的？
+
+---
+
+# 可靠性強化：幻覺防線與紀錄治理（2026-07-17）
+
+> 針對六個已知坑的系統性強化，重點是「不信任 CLI 回報、要機器鐵證」。設計參考自成熟 coding agent 的公開規格，全部用零依賴 Node.js 實作。
+
+## 六個已知坑與對應強化
+
+| 已知坑 | 強化做法 | 狀態 |
+|---|---|---|
+| **① headless 幻覺回報「已完成」但沒落地**（最痛）| 棒後驗收分類器 + 產物契約 + 單棒劣化閘門（三層防線）| ✅ B1/B3/A4 已做 |
+| **② docs/LOG.md 無上限增長** | 大小門檻自動輪替封存 + 產出區塊頭尾剪裁 | ✅ A2/A3 已做 |
+| **③ 並行任務碰同檔衝突** | 任務級 worktree 隔離；過渡版：派工前 checkpoint + 前綴指紋前置檢查 | ⬜ C1/C2 未做 |
+| **④ spawn shell 參數注入面** | sandbox/model 白名單驗證 + isSafeArgValue() 共用 + config schema 驗證 | ✅ A5 已做 |
+| **⑤ 規劃單點：headless 總指揮易懸** | 規劃迴圈重試上限 + 輸出級迴圈偵測（比對連續嘗試雷同度）| ⬜ 部分（planWithFallback 已有降級）|
+| **⑥ 冷卻/重試太粗** | 暫態短重試→換手 + 冷卻指數化+抖動 + fatal/auth 態細分 | ✅ B4 已做（fatal 態未做）|
+
+## 已完成（2026-07-17）
+
+**階段 A（小工程）**：
+- **A1** 交接過期警語（memory.js staleWarning）：HANDOFF >24h 注入前加警語提醒核對現狀
+- **A2** LOG 大小門檻自動輪替封存（log.js rotateIfHuge）：>200KB 搬 docs/log-archive/
+- **A3** 產出頭尾剪裁（log.js trimOutput）：>3200 字改頭 1500+尾 1500
+- **A4** codex 零動作幻覺標記（classifyCodex）：完成宣稱但零命令/改檔事件 → suspectNoAction
+- **A5** 參數安全驗證（spawn.js isSafeArgValue + cli.js validateConfig）
+
+**階段 B（核心防線）**：
+- **B1** 棒後驗收分類器（verify.js）：每棒完工餵 git diff harness-truth 鐵證判幻覺，config.verify 開關（預設關）
+- **B3** 單棒劣化輸出偵測（isDegenerateReport）：剝空洞語句後 <200 字且無可驗證線索判劣化
+- **B4** 冷卻/重試分級（orchestrator + state）：暫態錯誤同家短重試（指數退避+抖動）、冷卻依 failStreak 指數化
+
+## 剩餘（未做，另議）
+
+- **B2** 任務產物契約化：總指揮規劃時每個 implement 任務填 expectedOutputs，標 done 前 fs.existsSync + mtime 檢查
+- **C1** 任務級 git worktree 隔離：並行任務各自 worktree，綁生命週期（大工程）
+- **C2** 派工前 checkpoint：worktree 前的過渡版，git 影子 ref 存快照可一鍵退回
+- **C3** 外部 Re-Auth 掛勾：auth 錯誤先試自備登入腳本再冷卻
+- **fatal 態**：偵測「換誰都會失敗」的錯誤，不浪費其他家額度
+
+## 明確不做（誠實排除）
+
+- **向量搜尋記憶（SQLite FTS5 + embedding）**：本工具是整段抄錄固定 docs 段落，沒有「多筆候選再排序」場景，硬套要背 embedding 相依 → 違反零依賴
+- **核心層 sandbox（OS-level）**：本工具驅動的是外部 CLI，管不到它們的核心層（那是 agent 自己才管得到子行程）。唯一可行的是 grok adapter 的 `--disallowed-tools`（純軟體、跨平台），列為偵察項
+- **TUI 元件**：本工具是 web 控制台不是 TUI，互動模型不同

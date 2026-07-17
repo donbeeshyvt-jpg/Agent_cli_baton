@@ -21,6 +21,22 @@ function extractSection(text, heading, cap = 1600) {
   return m ? m[0].slice(0, cap).trim() : '';
 }
 
+// A1：交接快照會腐壞，策展規則不會。
+// 只對 HANDOFF 的 Last Completed Task 時間戳做時效檢查——太舊就提醒下一棒先核對現狀，
+// 降低「帶著過期假設疊加幻覺」的風險。>此時數即警告，可用環境變數覆寫。
+export const HANDOFF_STALE_HOURS = Number(process.env.AGENTBATON_STALE_HOURS) || 24;
+export function staleWarning(handoffText, now = new Date()) {
+  if (!handoffText) return '';
+  // 從 "## Last Completed Task" 下一行抓 ISO 時間戳（recordDispatchResult 寫入的同格式）
+  const m = handoffText.match(/## Last Completed Task\s*\n\s*(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
+  if (!m) return '';
+  const ts = new Date(m[1]);
+  if (Number.isNaN(ts.getTime())) return '';
+  const ageHours = (now - ts) / 3600000;
+  if (ageHours <= HANDOFF_STALE_HOURS) return '';
+  return `⚠️ 交接紀錄已 ${ageHours.toFixed(1)} 小時未更新。開工前請先核對現狀（git status、相關檔案是否與描述一致）再動手，避免疊加過期假設。`;
+}
+
 /** 組出「共享記憶 + 協作守則 + 任務」的完整派工 prompt */
 export function composeDispatchPrompt(cwd, task) {
   const docs = join(cwd, 'docs');
@@ -36,6 +52,9 @@ export function composeDispatchPrompt(cwd, task) {
   ].filter(Boolean);
 
   if (!pieces.length) return task; // 沒有紀錄（非 Record System 專案）就原樣派工
+
+  const stale = staleWarning(handoff); // A1：交接太舊就在最前面插警語
+  if (stale) pieces.unshift(stale);
 
   return [
     '=== 共享記憶（多 CLI 協作接力紀錄）===',

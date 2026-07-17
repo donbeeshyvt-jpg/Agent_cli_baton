@@ -26,6 +26,20 @@ const HOME = process.env.USERPROFILE || process.env.HOME || '';
 export const LIMIT_RE = /usage limit|rate.?limit|quota (?:exceeded|reached|hit)|too many requests|hit your (?:usage|limit)|insufficient_quota|out of (?:credits|usage)|(?:status|code|error)\D{0,12}429\b|\b429\D{0,12}(?:too many|rate)/i;
 export const AUTH_RE = /authentication (?:failed|required|error)|failed to authenticate|unauthorized|not logged in|please (?:log|sign) ?in|invalid (?:\w+ )?credential|re-?authenticat|(?:status|code|error)\D{0,12}401\b/i;
 
+// B3：判「疑似空洞幻覺回報」。
+// 手法：剝掉「已完成/done/finished」這類空殼語句後，若清理後字數 < 門檻，且內容裡找不到任何
+// 可驗證線索（檔案路徑、指令、diff/程式碼片段、exit code、測試結果數字），就判 degenerate。
+// 用途：實作/測試類任務完工當下的第一道低成本濾網——不改 ok 判定，只給上層弱信號。
+const DONE_SHELL_RE = /已完成|已處理|完成了?|搞定|done\.?|finished\.?|completed\.?|ok\.?|success(?:fully)?\.?|沒問題|好了/gi;
+const EVIDENCE_RE = /[./\\][\w.-]+\.\w{1,6}|`[^`]+`|exit\s*(?:code)?\s*\d|\bpass(?:ed|ing)?\b|\bfail(?:ed|ing)?\b|\d+\s*\/\s*\d+|diff|\+\+\+|---|\btest\b|測試|函式|function|npm |node |git /i;
+export function isDegenerateReport(text, minChars = 200) {
+  const s = String(text || '').trim();
+  if (!s) return true; // 全空當然劣化
+  if (EVIDENCE_RE.test(s)) return false; // 有任何可驗證線索就不算劣化
+  const stripped = s.replace(DONE_SHELL_RE, '').replace(/\s+/g, ' ').trim();
+  return stripped.length < minChars;
+}
+
 /**
  * 從錯誤訊息解析「重試時間」→ 未來的 Date（解析不到回 null，上層用預設冷卻分鐘數）。
  * P0 修復（AUDIT #7）：支援四種真實格式 ——
@@ -292,11 +306,16 @@ export async function classifyCodex(res, outFile) {
   let limitMsg = null;
   let errMsg = null;
   let turnFailed = false;
+  let actionCount = 0; // A4：統計「真的做了事」的事件（執行命令 / 改檔）
   for (const line of res.stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let ev;
     try { ev = JSON.parse(line); } catch { continue; }
     if (ev.type === 'turn.failed') turnFailed = true;
+    if (ev.type === 'item.completed') {
+      const itype = (ev.item && (ev.item.type || ev.item.item_type)) || '';
+      if (itype === 'command_execution' || itype === 'file_change') actionCount++;
+    }
     if (ev.type === 'error' || ev.type === 'turn.failed') {
       const m = ev.message || (ev.error && ev.error.message) || '';
       if (LIMIT_RE.test(m)) limitMsg = m;
@@ -321,7 +340,13 @@ export async function classifyCodex(res, outFile) {
 
     let text = '';
     try { text = (await readFile(outFile, 'utf8')).trim(); } catch { /* 沒產生 */ }
-    if (text) return { status: 'ok', text, raw: res };
+    if (text) {
+      // A4：成功但整輪零「命令執行/改檔」事件 → 可疑（只有文字回覆，可能是幻覺回報「已完成」）
+      // suspectNoAction 只是弱信號旗標，不改變 ok 判定；由上層（web-ui 紅字 / 驗收層）決定怎麼用。
+      const r = { status: 'ok', text, raw: res };
+      if (actionCount === 0) r.suspectNoAction = true;
+      return r;
+    }
     return fallbackClassify(res);
   } finally {
     // P0 修復（AUDIT #12）：outFile 用完即刪，不在 tmpdir 洩漏

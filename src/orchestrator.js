@@ -13,9 +13,28 @@
 //
 // Goal 1 接線：派工前注入共享記憶（memory.js），成功後寫回交接紀錄。
 import { PROVIDERS } from './providers.js';
-import { loadState, isCoolingDown, setCooldown, recordUse, getUses, getLastUsedAt, setCurrent, clearCurrent, updateCurrentLive, updateState } from './state.js';
+import { loadState, isCoolingDown, setCooldown, recordUse, getUses, getLastUsedAt, getFailStreak, setCurrent, clearCurrent, updateCurrentLive, updateState } from './state.js';
 import { appendLog } from './log.js';
 import { composeDispatchPrompt, recordDispatchResult } from './memory.js';
+import { isSafeArgValue } from './spawn.js';
+
+// B4：暫態錯誤同家原地短重試，別為了網路抖動就整條鏈判死。
+// 只認「換一家也一樣會發生」的暫態訊號：連線重置、逾時、DNS 失敗、5xx。
+export const TRANSIENT_RE = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|(?:status|code)\D{0,8}5\d\d\b|502|503|504/i;
+const TRANSIENT_MAX_RETRY = 2;      // 小預算快升級：撐不過就換手，不像 5xx 那樣重試 15 次
+const TRANSIENT_BASE_MS = 2000;     // 退避基數：2s、4s（封頂 30s）
+// 指數退避 + ±20% 抖動（抗驚群）。attempt 從 1 起算。
+export function backoffMs(attempt, base = TRANSIENT_BASE_MS, cap = 30000, rand = Math.random) {
+  const exp = Math.min(base * 2 ** (attempt - 1), cap);
+  return Math.round(exp * (0.8 + rand() * 0.4)); // 0.8~1.2 倍
+}
+// B4：冷卻時長「按連續失敗次數指數化 + 抖動」。第 1 次冷卻用 baseMin，之後每次翻倍（封頂 4 倍），加抖動。
+export function jitteredCooldownUntil(baseMin, failStreak = 0, from = Date.now(), rand = Math.random) {
+  const mult = Math.min(2 ** Math.max(0, failStreak), 4); // 1,2,4,4...
+  const ms = baseMin * 60000 * mult * (0.9 + rand() * 0.2); // ±10% 抖動
+  return new Date(from + Math.round(ms));
+}
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 // stateCwd：額度/冷卻狀態存放處（預設同 cwd）。任務書模式派工到「作業區」時，
 // cwd=作業區（紀錄跟著專案走），stateCwd=agentbaton 本體（額度是 provider 全域的，不該分散在各作業區）。
@@ -78,8 +97,14 @@ export async function runTask({ cwd, stateCwd = cwd, prompt, chain, config, mode
     // 真的叫這家 CLI（adapter 例外不可打斷換手鏈）
     const model = modelFor(name);
     // model 白名單驗證（一處擋四家）：.cmd 走 shell:true 時 Node 不跳脫 args，擋掉空白/shell 符號
-    if (model && !/^[\w.\-+:/[\]=,]+$/.test(model)) {
+    if (model && !isSafeArgValue(model)) {
       attempts.push({ provider: name, status: 'error', message: `model 含非法字元：${String(model).slice(0, 40)}` });
+      continue;
+    }
+    // A5：sandbox 值也會進 codex argv（-s <sandbox>），同樣要驗，防 config 被污染成注入向量
+    const sandboxVal = config.providers?.[name]?.sandbox;
+    if (sandboxVal && !isSafeArgValue(sandboxVal)) {
+      attempts.push({ provider: name, status: 'error', message: `sandbox 含非法字元：${String(sandboxVal).slice(0, 40)}` });
       continue;
     }
     const started = Date.now();
@@ -102,17 +127,33 @@ export async function runTask({ cwd, stateCwd = cwd, prompt, chain, config, mode
       if (!liveTimer) liveTimer = setTimeout(flushLive, 800);
     };
     let r;
+    // B4：暫態錯誤（連線重置/逾時/5xx）同家原地短重試，退避+抖動；耗盡才落到換手邏輯
+    let transientTry = 0;
     try {
-      r = await provider.run(finalPrompt, {
-        cwd,
-        timeoutMs: timeoutMs ?? config.timeoutMs ?? 180000,
-        sandbox: config.providers?.[name]?.sandbox,
-        model,
-        effort,
-        onProgress,
-      });
-    } catch (err) {
-      r = { status: 'error', message: `adapter 例外: ${(err && err.message) || err}` };
+      for (;;) {
+        try {
+          r = await provider.run(finalPrompt, {
+            cwd,
+            timeoutMs: timeoutMs ?? config.timeoutMs ?? 180000,
+            sandbox: config.providers?.[name]?.sandbox,
+            model,
+            effort,
+            onProgress,
+          });
+        } catch (err) {
+          r = { status: 'error', message: `adapter 例外: ${(err && err.message) || err}` };
+        }
+        // 只有「非成功 + 訊息像暫態 + 還有重試預算」才原地退避重試
+        const looksTransient = r.status !== 'ok' && r.status !== 'limit' && TRANSIENT_RE.test(String(r.message || ''));
+        if (looksTransient && transientTry < TRANSIENT_MAX_RETRY) {
+          transientTry++;
+          const wait = backoffMs(transientTry);
+          onProgress(`⏳ 暫態錯誤，${Math.round(wait / 1000)}s 後同家重試（第 ${transientTry}/${TRANSIENT_MAX_RETRY} 次）`);
+          await sleep(wait);
+          continue;
+        }
+        break;
+      }
     } finally {
       if (liveTimer) clearTimeout(liveTimer);
       clearCurrent(stateCwd, name); // 只清這家（並行下不能全清）
@@ -134,7 +175,9 @@ export async function runTask({ cwd, stateCwd = cwd, prompt, chain, config, mode
         && !Number.isNaN(r.resetAt.getTime())
         && r.resetAt > limitNow
         && (r.resetAt.getTime() - limitNow.getTime()) < 7 * 24 * 3600 * 1000;
-      const until = validReset ? r.resetAt : new Date(limitNow.getTime() + cooldownMin(name) * 60000);
+      // B4：有真實重置時間就用它（最準）；退回預設冷卻時改用指數退避+抖動（連續撞牆就拉長，防狂試）
+      const streak = getFailStreak(loadState(stateCwd), name);
+      const until = validReset ? r.resetAt : jitteredCooldownUntil(cooldownMin(name), streak, limitNow.getTime());
       await updateState(stateCwd, (s) => setCooldown(s, name, until, r.message)); // 原子：冷卻立即落地
       attempts.push({ provider: name, status: 'limit', ms, until: until.toISOString(), message: short(r.message) });
       appendLog(cwd, { provider: name, status: 'limit', ms, until, message: r.message });

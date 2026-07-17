@@ -12,6 +12,7 @@ import { runTask } from './orchestrator.js';
 import { getQuotaSnapshot } from './quota.js';
 import { loadState, isCoolingDown } from './state.js';
 import { composeSkillBlock, SKILL_CORES } from './skills.js';
+import { verifyBar } from './verify.js';
 
 // 三技能核心改由 skills.js（讀專案內建 skills/）提供，任何機器/任何家都自包含。
 const OS_CORE = SKILL_CORES.Agent_OS_Skill;
@@ -479,10 +480,21 @@ export async function executeMission({ workdir, stateCwd, config, mission, selec
     running.delete(task.id);
     busy.delete(provider);
     if (out.chosen) {
-      task.status = 'done';
       task.doneBy = out.chosen;
       task.ms = out.ms || null;
       task.resultSummary = String(out.result || '').replace(/\s+/g, ' ').slice(0, 400);
+      // B1：棒後驗收分類器（可選，config.verify.enabled）。餵 harness-truth 鐵證抓幻覺回報。
+      // 判 CLAIMED_NO_EVIDENCE → 標 unverified（介於 done 與 failed，會被送進總驗收讓總指揮看到紅旗）。
+      let verdict = null;
+      try { verdict = await verifyBar({ cwd: workdir, stateCwd, config, task: `#${task.id} ${task.title}：${task.description || ''}`, claimText: out.result }); }
+      catch { /* 驗收失敗不擋主流程 */ }
+      if (verdict && verdict.verdict === 'CLAIMED_NO_EVIDENCE') {
+        task.status = 'unverified';
+        task.resultSummary = `⚠️ 疑似幻覺回報（${verdict.evidence}）｜原宣稱：${task.resultSummary}`.slice(0, 400);
+      } else {
+        task.status = 'done';
+        if (verdict) task.verifyEvidence = verdict.evidence; // 留驗收依據供追溯
+      }
     } else {
       // 這家沒成（額度/認證/錯誤）→ 記下試過的，還有別家就退回 pending 重排，否則 failed
       task._tried = [...(task._tried || []), provider];
@@ -500,7 +512,8 @@ export async function executeMission({ workdir, stateCwd, config, mission, selec
   if (stopped) { mission.status = 'stopped'; saveMission(workdir, mission); onProgress(mission); return mission; }
 
   // 總驗收：對照完成目標出報告（總指揮鏈，一次呼叫）
-  const remaining = mission.tasks.filter((t) => t.status !== 'done' && t.status !== 'skipped');
+  // unverified（B1 驗收判疑似幻覺）視為「完工但帶紅旗」——不阻止總驗收，讓總指揮在報告裡看到並處理
+  const remaining = mission.tasks.filter((t) => t.status !== 'done' && t.status !== 'skipped' && t.status !== 'unverified');
   if (remaining.length === 0) {
     try {
       const verifyPrompt = [
@@ -508,6 +521,7 @@ export async function executeMission({ workdir, stateCwd, config, mission, selec
         `完成目標：${mission.goal}`,
         '各任務結果：',
         ...mission.tasks.map((t) => `- #${t.id} ${t.title}（${t.status}${t.doneBy ? `，由 ${t.doneBy}` : ''}）：${t.resultSummary || ''}`),
+        mission.tasks.some((t) => t.status === 'unverified') ? '⚠️ 標記 unverified 的任務已被驗收分類器判「疑似幻覺回報」（宣稱完成但 harness 鐵證顯示沒有對應變動），請務必當成缺口、傾向判未達成。' : '',
         '證據鐵律：判定必須附「實際執行的命令＋原始輸出」；跑不了命令就明講「未實際執行」，嚴禁把推測寫成實測。',
         '請簡短輸出：【判定】達成/未達成；【依據】對照驗收標準的證據；【缺口】若有。',
       ].join('\n');

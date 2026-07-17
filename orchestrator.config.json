@@ -7,6 +7,11 @@
   "mission": {
     "maxTasks": 12
   },
+  "verify": {
+    "enabled": false,
+    "provider": null,
+    "_說明": "B1 棒後驗收分類器：每棒完工後多一次便宜 headless 呼叫，餵 git diff 等 harness-truth 鐵證抓幻覺回報。enabled=true 才開（多燒一點額度換幻覺攔截）。provider=null 用總指揮鏈，或指定某家專做驗收。"
+  },
   "_strategy_說明": "balance=負載平衡(均攤額度,least-used優先) / priority=依鏈順序(配合角色鏈=角色分工)。可用 --strategy 或 --only 單獨叫某家當子代理覆寫。",
   "chains": {
     "default": [

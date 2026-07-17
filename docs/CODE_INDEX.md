@@ -20,6 +20,7 @@
 | `doctor.js` | Preflight: verify each CLI installed + logged in (zero quota) | 啟動前檢查：各家已安裝＋登入（讀本地憑證，零額度）| `runDoctor` |
 | `server.js` | Web console backend: node:http + SSE, 127.0.0.1 only, busy lock, dispatch/chat/docs/skills/mission API | web 控制台後端：SSE 即時推播、只綁本機、單一寫者鎖、各種 API | `serve` |
 | `web-ui.js` | Single-file frontend (no CDN/framework, XSS-safe via textContent, dark/light) | 單檔前端：狀態卡/派工表單/對話/紀錄/技能面板/即時進度摺疊 | `WEB_UI` |
+| `verify.js` | Post-dispatch verification classifier: feed git-diff harness-truth to catch hallucinated "done" | 棒後驗收分類器：餵 git diff 鐵證抓幻覺回報，判 DONE_VERIFIED/CLAIMED_NO_EVIDENCE/PARTIAL。config.verify 開關 | `verifyBar`, `collectHarnessTruth`, `buildVerifyPrompt`, `parseVerdict` |
 
 ## test/
 
