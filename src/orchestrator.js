@@ -12,7 +12,7 @@
 //   - provider.run 包 try/catch，adapter 例外不打斷換手鏈
 //
 // Goal 1 接線：派工前注入共享記憶（memory.js），成功後寫回交接紀錄。
-import { PROVIDERS } from './providers.js';
+import { PROVIDERS, isDegenerateReport } from './providers.js';
 import { loadState, isCoolingDown, setCooldown, recordUse, getUses, getLastUsedAt, getFailStreak, setCurrent, clearCurrent, updateCurrentLive, updateState } from './state.js';
 import { appendLog } from './log.js';
 import { composeDispatchPrompt, recordDispatchResult } from './memory.js';
@@ -163,10 +163,14 @@ export async function runTask({ cwd, stateCwd = cwd, prompt, chain, config, mode
     if (r.status === 'ok') {
       await updateState(stateCwd, (s) => recordUse(s, name, new Date(), ms)); // 原子：記次數＋耗時
       const usedModel = model || r.actualModel || '(該家預設)';
+      // B3/A4 弱信號接線：劣化輸出偵測 + codex 零動作旗標——不改 ok 判定，
+      // 但一路帶到 LOG 標記、任務摘要、與 B1 驗收的額外鐵證（環環相扣）。
+      const degenerate = isDegenerateReport(r.text);
+      const suspectNoAction = Boolean(r.suspectNoAction);
       attempts.push({ provider: name, status: 'ok', ms, model: usedModel });
-      appendLog(cwd, { provider: name, status: 'ok', ms, model: usedModel, result: r.text });
+      appendLog(cwd, { provider: name, status: 'ok', ms, model: usedModel, result: r.text, degenerate, suspectNoAction });
       if (memory) recordDispatchResult(cwd, { provider: name, task: prompt, result: r.text }); // 寫回交接
-      return { chosen: name, result: r.text, attempts, ms, model: usedModel, strategy: strat };
+      return { chosen: name, result: r.text, attempts, ms, model: usedModel, strategy: strat, degenerate, suspectNoAction };
     }
 
     if (r.status === 'limit') {

@@ -14,7 +14,7 @@ import {
 import { loadState, saveState, setCooldown, isCoolingDown, recordUse, getUses, getFailStreak } from '../src/state.js';
 import { composeDispatchPrompt, recordDispatchResult, staleWarning } from '../src/memory.js';
 import { needsShell, sanitizedEnv, isSafeArgValue } from '../src/spawn.js';
-import { summarizeBriefIfHuge, planWithFallback, buildPlanPrompt } from '../src/mission.js';
+import { summarizeBriefIfHuge, planWithFallback, buildPlanPrompt, parsePlan } from '../src/mission.js';
 import { trimOutput } from '../src/log.js';
 import { isDegenerateReport } from '../src/providers.js';
 import { backoffMs, jitteredCooldownUntil, TRANSIENT_RE } from '../src/orchestrator.js';
@@ -571,4 +571,35 @@ test('collectHarnessTruth: git repo 裡的 untracked 新檔要算進 changedFile
     // 沒 git 的環境跳過（CI 有 git）
     if (!/git/.test(String(e.message))) throw e;
   }
+});
+
+// 接線稽核修復：B3/A4 弱信號要一路帶到 LOG 標記與 B1 額外鐵證
+test('appendLog: degenerate/suspectNoAction 旗標寫進 LOG 標記', async () => {
+  const { appendLog } = await import('../src/log.js');
+  const dir = mkdtempSync(join(tmpdir(), 'baton-log-'));
+  appendLog(dir, { provider: 'codex', status: 'ok', ms: 100, result: '已完成', degenerate: true, suspectNoAction: true });
+  const log = readFileSync(join(dir, 'docs', 'LOG.md'), 'utf8');
+  assert.match(log, /疑似空洞回報/);
+  assert.match(log, /零動作事件/);
+});
+
+test('buildVerifyPrompt: extraTruth 弱信號攤進鐵證區', () => {
+  const p = buildVerifyPrompt({ task: 't', claimText: 'done', truth: { gitAvailable: true, changedFiles: 0, changedLines: 0, diffStat: '' }, extraTruth: '上游弱信號：codex 零動作' });
+  assert.match(p, /上游弱信號：codex 零動作/);
+  assert.ok(p.indexOf('上游弱信號') < p.indexOf('=== 機器鐵證') + 500, '弱信號要在鐵證區內');
+});
+
+// 大型實戰抓到的 bug：規劃單描述含 ```（反引號圍欄）時，圍欄正則提早截斷 → 全滅
+test('parsePlan: 任務描述含 ``` 反引號不再截斷（實戰回歸）', () => {
+  const reply = '```json\n{"goal":"做 markdown 模組","tasks":[{"id":1,"title":"markdown","description":"支援 ```圍欄程式碼區塊``` 與 `inline code`","role":"implement","provider":"codex","acceptance":"全綠","dependsOn":[]}]}\n```';
+  const r = parsePlan(reply, { maxTasks: 12, providers: ['claude','codex','grok','cursor'] });
+  assert.ok(!r.error, `不應解析失敗：${r.error}`);
+  assert.equal(r.plan.tasks.length, 1);
+  assert.match(r.plan.tasks[0].description, /圍欄程式碼區塊/);
+});
+
+test('parsePlan: 無圍欄 + 描述含 } 與 ``` 也能抽（平衡掃描泛化）', () => {
+  const reply = '規劃如下：{"goal":"g","tasks":[{"id":1,"title":"t","description":"用 ``` 包 {x} 的碼","role":"implement","provider":"grok","acceptance":"a","dependsOn":[]}]} 以上。';
+  const r = parsePlan(reply, { maxTasks: 12, providers: ['claude','codex','grok','cursor'] });
+  assert.ok(!r.error, `不應解析失敗：${r.error}`);
 });

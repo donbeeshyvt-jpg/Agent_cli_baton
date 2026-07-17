@@ -10,6 +10,8 @@
 //
 // 設計成「可選」（config.verify.enabled，預設關）：每棒多一次 headless 呼叫 = 多燒一點額度換幻覺攔截。
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
 import { runTask } from './orchestrator.js';
 
 // 蒐集 harness-truth：這棒實際造成的可驗證變化。純本機、零外部依賴（git 是系統既有工具）。
@@ -37,9 +39,26 @@ export function collectHarnessTruth(cwd, { claimText = '', sinceRef = null } = {
           const lines = st.stdout.split(/\r?\n/).filter((l) => l.trim());
           const newFiles = lines.filter((l) => /^\?\?/.test(l)).map((l) => l.slice(3).trim())
             .filter((p) => !/^\.orchestrator\/|^docs\/|^AGENTS\.md$/.test(p));
+          // 大型實戰抓到的誤判：untracked 檔在 diff --stat 沒行數 → 鐵證寫「約 0 行」
+          // → 分類器把真實作誤讀成空檔案。修法：實際數每個新檔的行數（上限 20 檔、單檔 256KB）。
+          const detailed = [];
+          let newLines = 0;
+          for (const p of newFiles.slice(0, 20)) {
+            try {
+              const buf = readFileSync(joinPath(cwd, p));
+              const text = buf.slice(0, 262144).toString('utf8');
+              const n = text.split('\n').length;
+              newLines += n;
+              detailed.push(`${p}(${n}行)`);
+            } catch { detailed.push(p); }
+          }
           truth.untrackedFiles = newFiles.slice(0, 20);
           truth.changedFiles += newFiles.length; // 新檔也算「做了事」的鐵證
-          if (newFiles.length && !truth.diffStat) truth.diffStat = `新增檔案：${newFiles.join('、').slice(0, 800)}`;
+          truth.changedLines += newLines;        // 新檔行數也計入，不再誤報 0 行
+          if (newFiles.length) {
+            const listing = `新增檔案：${detailed.join('、').slice(0, 800)}`;
+            truth.diffStat = truth.diffStat ? `${truth.diffStat}\n${listing}` : listing;
+          }
         }
       } catch { /* status 失敗就只靠 diff */ }
     }
@@ -51,7 +70,8 @@ export function collectHarnessTruth(cwd, { claimText = '', sinceRef = null } = {
 }
 
 // 組驗收分類器的 prompt（餵鐵證，不問「你做完沒」）
-export function buildVerifyPrompt({ task, claimText, truth }) {
+// extraTruth：上游弱信號（如 codex 零動作事件、劣化輸出偵測）也攤進鐵證，環環相扣。
+export function buildVerifyPrompt({ task, claimText, truth, extraTruth = '' }) {
   const truthLines = truth.gitAvailable
     ? [
         `git diff --stat（這棒實際的檔案變動，這是機器量的，無法造假）：`,
@@ -59,6 +79,7 @@ export function buildVerifyPrompt({ task, claimText, truth }) {
         `→ 改了 ${truth.changedFiles} 個檔、約 ${truth.changedLines} 行`,
       ]
     : ['（此作業區非 git repo，拿不到檔案變動鐵證，請只依「宣稱內容是否具體可驗證」判斷）'];
+  if (extraTruth) truthLines.push(extraTruth); // 上游弱信號一併攤給分類器
   return [
     '你是嚴格的驗收稽核員。有個 CLI 剛「宣稱」完成了一個任務，你要判斷它是真做了還是幻覺回報。',
     '規則：不要相信宣稱的文字，只信下面的機器鐵證。宣稱說改了檔但鐵證顯示 0 檔變動 = 幻覺回報。',
@@ -105,11 +126,11 @@ export function parseVerdict(text) {
  * @returns { verdict, confidence, evidence, truth } 或 null（未啟用/失敗）
  * runFn 可注入（測試用），預設用真的 runTask。
  */
-export async function verifyBar({ cwd, stateCwd, config, task, claimText, sinceRef = null, runFn = runTask }) {
+export async function verifyBar({ cwd, stateCwd, config, task, claimText, sinceRef = null, extraTruth = '', runFn = runTask }) {
   if (!config?.verify?.enabled) return null; // 預設關，明確開才跑
   try {
     const truth = collectHarnessTruth(cwd, { claimText, sinceRef });
-    const prompt = buildVerifyPrompt({ task, claimText, truth });
+    const prompt = buildVerifyPrompt({ task, claimText, truth, extraTruth });
     // 用便宜的一次呼叫：不注入共享記憶（memory:false，省 token）、走總指揮鏈或指定驗收家
     const chain = config.verify.provider ? [config.verify.provider] : [config.chief || 'claude', ...Object.keys(config.providers || {})].filter((v, i, a) => a.indexOf(v) === i);
     const out = await runFn({ cwd, stateCwd, prompt, chain, config, strategy: 'priority', memory: false, effort: 'low' });

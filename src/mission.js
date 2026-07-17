@@ -5,7 +5,7 @@
 //   Loop_Engineering_Skill 子代理彈性判斷：任務若是「重複/持續型」先設計迴圈規格再動
 //   Record_System_Skill    全程交接紀錄：紀錄寫在「作業區」的 docs/，換手不失憶
 // claude 原生觸發已安裝技能；grok/cursor 沒技能系統 → 注入下方濃縮版核心程序（像商用 APP 的內建 system prompt）。
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { PROVIDERS } from './providers.js';
 import { runTask } from './orchestrator.js';
@@ -145,32 +145,36 @@ export async function planWithFallback({ cwd, stateCwd, prompt, chain, config, e
   return { error: '所有總指揮候選都無法產出有效規劃單（逾時或格式錯誤）', attempts };
 }
 
-// 從總指揮回覆中抽出 JSON 規劃單（容錯：圍欄優先，退而求其次抓平衡大括號）
+// 字串感知的平衡大括號抽取：從 from 位置起找第一個 {，配對到對應的 }。
+// 免疫字串內的 } 與 ```（大型實戰抓到的 bug：任務描述含「```圍欄」會讓圍欄正則提早截斷）。
+function extractBalancedJson(s, from = 0) {
+  const start = s.indexOf('{', from);
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) return s.slice(start, i + 1); }
+  }
+  return null;
+}
+
+// 從總指揮回覆中抽出 JSON 規劃單。
+// 修正：不再依賴「收尾 ```」——描述欄常含反引號（例如需求提到圍欄語法），
+// 非貪婪圍欄正則會在字串內的 ``` 提早截斷。改成：找到 ```json 開頭標記後，
+// 直接用字串感知的平衡大括號掃描抽 JSON（#8 的掃描器泛化）。
 export function parsePlan(text, { maxTasks = 12, providers = Object.keys(PROVIDERS) } = {}) {
   if (!text) return { error: '總指揮沒有回覆內容' };
-  let raw = null;
-  const fenced = String(text).match(/```json\s*([\s\S]*?)```/i) || String(text).match(/```\s*(\{[\s\S]*?\})\s*```/);
-  if (fenced) raw = fenced[1];
-  else {
-    const s = String(text);
-    const start = s.indexOf('{');
-    if (start >= 0) {
-      // 括號計數時略過字串內字元（處理引號與跳脫），避免 goal 內含 } 提早截斷（#8）
-      let depth = 0, inStr = false, esc = false;
-      for (let i = start; i < s.length; i++) {
-        const ch = s[i];
-        if (inStr) {
-          if (esc) esc = false;
-          else if (ch === '\\') esc = true;
-          else if (ch === '"') inStr = false;
-          continue;
-        }
-        if (ch === '"') inStr = true;
-        else if (ch === '{') depth++;
-        else if (ch === '}') { depth--; if (depth === 0) { raw = s.slice(start, i + 1); break; } }
-      }
-    }
-  }
+  const s = String(text);
+  const fenceAt = s.search(/```json/i);
+  const raw = extractBalancedJson(s, fenceAt >= 0 ? fenceAt : 0);
   if (!raw) return { error: '回覆中找不到 JSON 規劃單' };
   let plan;
   try { plan = JSON.parse(raw); } catch (e) { return { error: `規劃單 JSON 解析失敗: ${e.message}` }; }
@@ -236,10 +240,13 @@ export function buildFixPrompt(mission) {
 
 export function parseFixTasks(text, mission, config) {
   const providers = Object.keys(config.providers || {});
-  const fenced = String(text || '').match(/```json\s*([\s\S]*?)```/i) || String(text || '').match(/(\{[\s\S]*\})/);
-  if (!fenced) return [];
+  // 同 parsePlan 修正：字串感知平衡大括號抽取，免疫描述內的 ``` 與 }
+  const s = String(text || '');
+  const fenceAt = s.search(/```json/i);
+  const raw = extractBalancedJson(s, fenceAt >= 0 ? fenceAt : 0);
+  if (!raw) return [];
   let obj;
-  try { obj = JSON.parse(fenced[1]); } catch { return []; }
+  try { obj = JSON.parse(raw); } catch { return []; }
   if (!Array.isArray(obj.tasks)) return [];
   const ROLES = ['plan', 'implement', 'review', 'test', 'docs', 'research'];
   let nextId = Math.max(0, ...mission.tasks.map((t) => t.id)) + 1;
@@ -259,8 +266,13 @@ export function parseFixTasks(text, mission, config) {
 export function saveMission(workdir, mission) {
   const dir = join(workdir, '.orchestrator');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'mission.json'), JSON.stringify(mission, null, 2));
-  const icon = (s) => (s === 'done' ? '✅' : s === 'running' ? '▶️' : s === 'failed' ? '❌' : s === 'skipped' ? '⏭️' : s === 'blocked' ? '🚫' : '⬜');
+  // 原子寫（tmp+rename，同 state.js 模式）：並行執行時 web UI/監控會同時讀這檔，
+  // 直接 writeFileSync 會讓讀者撞到撕裂 JSON（大型實戰監控時實際觀測到）。
+  const target = join(dir, 'mission.json');
+  const tmp = `${target}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(mission, null, 2));
+  renameSync(tmp, target);
+  const icon = (s) => (s === 'done' ? '✅' : s === 'running' ? '▶️' : s === 'failed' ? '❌' : s === 'skipped' ? '⏭️' : s === 'blocked' ? '🚫' : s === 'unverified' ? '⚠️' : '⬜');
   const md = [
     '# MISSION — 任務書', '',
     `建立：${mission.createdAt}　總指揮：${mission.chief}　狀態：${mission.status}`, '',
@@ -372,7 +384,8 @@ export async function executeMission({ workdir, stateCwd, config, mission, selec
   const inSel = (t) => !selectedIds || selectedIds.includes(t.id);
   const depOf = (id) => mission.tasks.find((x) => x.id === id);
   // #6：從未執行只是沒勾選（unselected skipped）不算依賴滿足；只有 done 或「已完成後跳過」才算
-  const depsDone = (t) => (t._deps || []).every((id) => { const d = depOf(id); return !d || d.status === 'done' || (d.status === 'skipped' && !d.unselected); });
+  // unverified = 「完工但帶紅旗」——下游依賴視為滿足（紅旗會被總驗收看到），否則會卡死整條鏈（實戰抓到的語意不一致）
+  const depsDone = (t) => (t._deps || []).every((id) => { const d = depOf(id); return !d || d.status === 'done' || d.status === 'unverified' || (d.status === 'skipped' && !d.unselected); });
   // #4：依賴有任一 failed/blocked/未執行跳過 → 這任務不可能安全執行（缺前置產物），要向下傳播 blocked
   const isDeadDep = (d) => d && (d.status === 'failed' || d.status === 'blocked' || (d.status === 'skipped' && d.unselected));
   const depDead = (t) => (t._deps || []).some((id) => isDeadDep(depOf(id)));
@@ -483,11 +496,18 @@ export async function executeMission({ workdir, stateCwd, config, mission, selec
       task.doneBy = out.chosen;
       task.ms = out.ms || null;
       task.resultSummary = String(out.result || '').replace(/\s+/g, ' ').slice(0, 400);
+      // B3/A4 弱信號進摘要（沒開 B1 也看得到紅旗）
+      const weakFlags = [];
+      if (out.suspectNoAction) weakFlags.push('零動作事件');
+      if (out.degenerate) weakFlags.push('輸出疑似空洞');
+      if (weakFlags.length) task.resultSummary = `⚠️（${weakFlags.join('、')}）${task.resultSummary}`.slice(0, 400);
       // B1：棒後驗收分類器（可選，config.verify.enabled）。餵 harness-truth 鐵證抓幻覺回報。
-      // 判 CLAIMED_NO_EVIDENCE → 標 unverified（介於 done 與 failed，會被送進總驗收讓總指揮看到紅旗）。
+      // 弱信號一併餵進去當額外鐵證（A4/B3 → B1 環環相扣）。
       let verdict = null;
-      try { verdict = await verifyBar({ cwd: workdir, stateCwd, config, task: `#${task.id} ${task.title}：${task.description || ''}`, claimText: out.result }); }
-      catch { /* 驗收失敗不擋主流程 */ }
+      try {
+        const extraTruth = weakFlags.length ? `上游弱信號：${weakFlags.map((f) => (f === '零動作事件' ? 'codex 事件流顯示這輪零「執行命令/改檔」動作' : '輸出剝掉空殼語句後過短且無可驗證線索')).join('；')}` : '';
+        verdict = await verifyBar({ cwd: workdir, stateCwd, config, task: `#${task.id} ${task.title}：${task.description || ''}`, claimText: out.result, extraTruth });
+      } catch { /* 驗收失敗不擋主流程 */ }
       if (verdict && verdict.verdict === 'CLAIMED_NO_EVIDENCE') {
         task.status = 'unverified';
         task.resultSummary = `⚠️ 疑似幻覺回報（${verdict.evidence}）｜原宣稱：${task.resultSummary}`.slice(0, 400);

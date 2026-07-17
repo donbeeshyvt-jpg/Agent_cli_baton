@@ -62,6 +62,9 @@ export function appendLog(cwd, entry) {
       line += ` · 冷卻到 ${u}`;
     }
     if (entry.message) line += ` · ${String(entry.message).replace(/\s+/g, ' ').slice(0, 200)}`;
+    // B3/A4 弱信號標記：在 LOG 一眼看得到「這棒可疑」
+    if (entry.degenerate) line += ' · ⚠️ 疑似空洞回報（無可驗證線索）';
+    if (entry.suspectNoAction) line += ' · ⚠️ 零動作事件（僅文字回覆）';
 
     let block = line + '\n';
     if (entry.status === 'ok' && entry.result) {

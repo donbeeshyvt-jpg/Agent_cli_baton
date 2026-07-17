@@ -42,3 +42,19 @@
 - **產出真實性**：EventBus 庫 40/40 測試綠、零依賴，總驗收親驗「✅ 達成」附實測證據。
 - **動了哪些檔**：src/verify.js（untracked 修復）、test/unit.test.mjs（+1 測試，共 55）。
 - **教訓**：實戰測試抓到單元測試測不到的 bug（tmpdir 非 git，測不到 untracked 場景）。呼應專案核心：不信任回報、要實跑鐵證。
+
+## 2026-07-17 — claude — 大型實戰（notegen 12 任務）+ 接線稽核，抓修 6 個真問題
+**背景**：用 12 任務級專案（notegen 靜態站產生器，四層依賴+中期審查閘門）驗證 8 機制「環環相扣」，全程開 B1 驗收。
+[交接]
+- **抓到並修好的 6 個問題（全部實戰逼出，單元測試測不到）**：
+  1. B3 劣化偵測是死碼（isDegenerateReport 沒人呼叫）→ 接進 orchestrator ok 分支 → LOG 標記 + 任務摘要 + B1 額外鐵證
+  2. A4 零動作旗標孤兒（suspectNoAction 只設不讀）→ 同上一路串起
+  3. parsePlan 圍欄截斷：任務描述含 ``` 反引號時非貪婪正則提早截斷 → 三家規劃全滅。改字串感知平衡大括號抽取（extractBalancedJson），parseFixTasks 同修
+  4. B1 新檔行數盲點：git diff --stat 不算 untracked 行數 → 鐵證寫「約 0 行」→ 真實作被誤判 unverified。改實際數每個新檔行數
+  5. unverified 依賴語意矛盾：下游 depsDone 不認 unverified → 帶紅旗完工的任務卡死整條鏈收斂 partial。改 depsDone 認 unverified
+  6. saveMission 非原子寫：並行時監控讀到撕裂 JSON（出現不存在的 completed 狀態）→ 改 tmp+rename 原子寫
+- **8 機制證據稽核**：6/8 實際觸發（A1 警語/A2 輪替 4 檔/A5 驗證/B1 11 驗收+1 攔截/B3 空洞標記/B4 failStreak）；A3/A4 本輪條件未觸發但接線由測試鎖住
+- **B1 實戰價值**：真的攔到 #5 indexer 一次 unverified（後證實是 B1 自己新檔行數盲點，已修）；其餘 11 棒都留了 git 鐵證驗收詞
+- **產出真實性**：notegen 8 模組 28/28 測試綠，CLI 實跑 `build examples _site` 真的編出 index.html + 3 篇筆記 HTML（DoD 達成）
+- **動了哪些檔**：src/{orchestrator,log,verify,mission}.js、test/unit.test.mjs（59 條）
+- **教訓**：大型專案（描述含特殊字元、多層依賴、並行讀寫）逼出的 bug，小專案完全測不到。這是「環環相扣」最有效的檢驗方式。
